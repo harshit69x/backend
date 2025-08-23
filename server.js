@@ -49,7 +49,7 @@ const upload = multer({
 // Initialize Excel parser
 const excelParser = new BankStatementExcelParser();
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://mohantyharshit303:Harshit009@expensetracker.xox4gee.mongodb.net/?retryWrites=true&w=majority&appName=expensetracker';
+const MONGODB_URI = process.env.MONGODB_URI;
 
 // Connect to MongoDB
 mongoose.connect(MONGODB_URI)
