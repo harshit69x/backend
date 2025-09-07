@@ -115,6 +115,61 @@ app.delete('/api/users/:id', async (req, res) => {
   }
 });
 
+// Set user income
+app.put('/api/users/:id/income', async (req, res) => {
+  try {
+    const { income } = req.body;
+    
+    if (income === undefined || income === null) {
+      return res.status(400).json({ error: 'Income value is required' });
+    }
+    
+    if (income < 0) {
+      return res.status(400).json({ error: 'Income cannot be negative' });
+    }
+    
+    const user = await User.findByIdAndUpdate(
+      req.params.id, 
+      { income: income }, 
+      { new: true }
+    ).select('-passwordHash');
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    res.json({ 
+      success: true, 
+      message: 'Income updated successfully',
+      user: user 
+    });
+  } catch (_err) {
+    console.error('Error updating user income:', _err);
+    res.status(500).json({ error: 'Failed to update user income' });
+  }
+});
+
+// Get user income
+app.get('/api/users/:id/income', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('income name email');
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    res.json({ 
+      userId: user._id,
+      name: user.name,
+      email: user.email,
+      income: user.income || 0 
+    });
+  } catch (_err) {
+    console.error('Error fetching user income:', _err);
+    res.status(500).json({ error: 'Failed to fetch user income' });
+  }
+});
+
 // --- Excel Bank Statement Processing ---
 app.post('/api/upload-bank-statement', upload.single('bankStatement'), async (req, res) => {
   try {
@@ -446,16 +501,27 @@ app.put('/api/categories/:id', async (req, res) => {
 app.delete('/api/categories/:id', async (req, res) => {
   try {
     const categoryId = req.params.id;
+    const { userId } = req.body; // Or get from auth token/query params
     
-    // First, delete all expenses that belong to this category
-    const deleteExpensesResult = await Expense.deleteMany({ categoryId: categoryId });
-    
-    // Then delete the category itself
-    const deletedCategory = await Category.findByIdAndDelete(categoryId);
-    
-    if (!deletedCategory) {
-      return res.status(404).json({ error: 'Category not found' });
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
     }
+    
+    // First, verify the category exists and belongs to the user
+    const category = await Category.findOne({ _id: categoryId, userId: userId });
+    
+    if (!category) {
+      return res.status(404).json({ error: 'Category not found or does not belong to this user' });
+    }
+    
+    // Delete all expenses that belong to this category AND this user
+    const deleteExpensesResult = await Expense.deleteMany({ 
+      categoryId: categoryId, 
+      userId: userId 
+    });
+    
+    // Then delete the category itself (we already verified it belongs to the user)
+    await Category.findByIdAndDelete(categoryId);
     
     res.json({ 
       success: true, 
