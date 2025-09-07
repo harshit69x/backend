@@ -467,6 +467,50 @@ app.delete('/api/expenses/:id', async (req, res) => {
   }
 });
 
+// Delete multiple expenses at once
+app.delete('/api/expenses', async (req, res) => {
+  try {
+    const { expenseIds, userId } = req.body;
+    
+    if (!expenseIds || !Array.isArray(expenseIds) || expenseIds.length === 0) {
+      return res.status(400).json({ error: 'expenseIds array is required and cannot be empty' });
+    }
+    
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
+    }
+    
+    // Validate that all expense IDs are valid ObjectIds
+    const { ObjectId } = mongoose.Types;
+    const validIds = expenseIds.filter(id => ObjectId.isValid(id));
+    
+    if (validIds.length !== expenseIds.length) {
+      return res.status(400).json({ 
+        error: 'Some expense IDs are invalid',
+        invalidIds: expenseIds.filter(id => !ObjectId.isValid(id))
+      });
+    }
+    
+    // Delete expenses that match the IDs AND belong to the user
+    const deleteResult = await Expense.deleteMany({
+      _id: { $in: validIds },
+      userId: userId
+    });
+    
+    res.json({
+      success: true,
+      message: `${deleteResult.deletedCount} expenses deleted successfully`,
+      deletedCount: deleteResult.deletedCount,
+      requestedCount: expenseIds.length,
+      notFound: expenseIds.length - deleteResult.deletedCount
+    });
+    
+  } catch (_err) {
+    console.error('Error deleting multiple expenses:', _err);
+    res.status(500).json({ error: 'Failed to delete expenses' });
+  }
+});
+
 // --- Categories CRUD ---
 app.get('/api/categories', async (req, res) => {
   try {
