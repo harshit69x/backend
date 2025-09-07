@@ -445,9 +445,25 @@ app.put('/api/categories/:id', async (req, res) => {
 
 app.delete('/api/categories/:id', async (req, res) => {
   try {
-    await Category.findByIdAndDelete(req.params.id);
-    res.json({ success: true });
+    const categoryId = req.params.id;
+    
+    // First, delete all expenses that belong to this category
+    const deleteExpensesResult = await Expense.deleteMany({ categoryId: categoryId });
+    
+    // Then delete the category itself
+    const deletedCategory = await Category.findByIdAndDelete(categoryId);
+    
+    if (!deletedCategory) {
+      return res.status(404).json({ error: 'Category not found' });
+    }
+    
+    res.json({ 
+      success: true, 
+      message: `Category deleted successfully. ${deleteExpensesResult.deletedCount} related expenses were also deleted.`,
+      deletedExpensesCount: deleteExpensesResult.deletedCount
+    });
   } catch (_err) {
+    console.error('Error deleting category:', _err);
     res.status(500).json({ error: 'Failed to delete category' });
   }
 });
