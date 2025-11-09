@@ -48,12 +48,12 @@ const register = async (req, res) => {
 
     // Return user without password
     const userResponse = {
-      _id: user._id,
-      name: user.name,
-      email: user.email,
-      preferences: user.preferences,
-      wallets: user.wallets,
-      token
+      message: 'User created successfully',
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email
+      }
     };
 
     res.status(201).json(userResponse);
@@ -93,12 +93,12 @@ const login = async (req, res) => {
 
     // Return user without password
     const userResponse = {
-      _id: user._id,
-      name: user.name,
-      email: user.email,
-      preferences: user.preferences,
-      wallets: user.wallets,
-      token
+      message: 'Login successful',
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email
+      }
     };
 
     res.json(userResponse);
@@ -138,12 +138,12 @@ const loginWithQuery = async (req, res) => {
 
     // Return user without password (maintain compatibility with existing app)
     const userResponse = {
-      _id: user._id,
-      name: user.name,
-      email: user.email,
-      preferences: user.preferences,
-      wallets: user.wallets,
-      token
+      message: 'Login successful',
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email
+      }
     };
 
     res.json(userResponse);
