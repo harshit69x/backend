@@ -14,7 +14,7 @@ const User = require('./models/user');
 const BankStatementExcelParser = require('./services/excelParser');
 
 // Auth Controller
-const { register, login, loginWithQuery, authenticateToken, optionalAuth } = require('./authController');
+const { register, login, loginWithQuery, verifyEmail, authenticateToken, optionalAuth } = require('./authController');
 
 const app = express();
 app.use(cors());
@@ -60,8 +60,14 @@ mongoose.connect(MONGODB_URI)
   });
 
 // --- Authentication Endpoints ---
+// SIGNUP endpoint - POST with JSON body
+app.post('/api/signup', register);
+
 // LOGIN endpoint - POST with JSON body (recommended)
 app.post('/api/login', login);
+
+// VERIFY EMAIL endpoint - POST to confirm email verification
+app.post('/api/verify-email', verifyEmail);
 
 // --- Users CRUD (with integrated auth) ---
 app.get('/api/users', async (req, res) => {
