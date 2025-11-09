@@ -59,6 +59,10 @@ mongoose.connect(MONGODB_URI)
     process.exit(1);
   });
 
+// --- Authentication Endpoints ---
+// LOGIN endpoint - POST with JSON body (recommended)
+app.post('/api/login', login);
+
 // --- Users CRUD (with integrated auth) ---
 app.get('/api/users', async (req, res) => {
   try {
