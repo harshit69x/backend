@@ -8,7 +8,7 @@ const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 // Register new user
 const register = async (req, res) => {
   try {
-    const { name, email, passwordHash, preferences } = req.body;
+    const { name, email, password, preferences } = req.body;
     
     if (!name || !email || !passwordHash) {
       return res.status(400).json({ error: 'Name, email and passwordHash are required' });
