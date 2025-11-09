@@ -10,12 +10,12 @@ const register = async (req, res) => {
   try {
     const { name, email, password, preferences } = req.body;
     
-    if (!name || !email || !passwordHash) {
-      return res.status(400).json({ error: 'Name, email and passwordHash are required' });
+    if (!name || !email || !password) {
+      return res.status(400).json({ error: 'Name, email and password are required' });
     }
 
-    if (passwordHash.length < 6) {
-      return res.status(400).json({ error: 'PasswordHapasswordHash must be at least 6 characters long' });
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters long' });
     }
 
     // Check if user already exists
@@ -26,7 +26,7 @@ const register = async (req, res) => {
 
     // Hash password
     const saltRounds = 12;
-    const hashedPassword = await bcrypt.hash(passwordHash, saltRounds);
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
 
     // Create user
     const user = new User({
