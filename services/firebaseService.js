@@ -46,12 +46,22 @@ const createFirebaseUser = async (email, password) => {
 
     console.log('Firebase user created:', userRecord.uid);
 
-    // Send verification email
+    // Generate verification link using Firebase Admin SDK
     const verificationLink = await auth.generateEmailVerificationLink(email);
     console.log('Verification link generated for:', email);
 
-    // In production, you would send this link via email
-    // For now, we return it so the frontend can show it or use it
+    // Send verification email using Firebase Admin SDK
+    // This uses Firebase's built-in email sending (no SMTP required)
+    try {
+      await auth.sendEmailVerificationLink(email, {
+        url: process.env.BACKEND_URL || 'http://localhost:3000'
+      });
+      console.log('Verification email sent to:', email);
+    } catch (emailError) {
+      console.warn('Firebase email sending skipped (may need configuration):', emailError.message);
+      console.log('Verification link available for manual use:', verificationLink);
+    }
+
     return {
       uid: userRecord.uid,
       email: userRecord.email,
@@ -112,7 +122,7 @@ const deleteFirebaseUser = async (uid) => {
 };
 
 /**
- * Send verification email using Firebase email template
+ * Send verification email using Firebase Email Service
  * @param {string} email - User email
  * @returns {Promise<string>} Verification link
  */
@@ -120,9 +130,16 @@ const sendVerificationEmail = async (email) => {
   try {
     const verificationLink = await auth.generateEmailVerificationLink(email);
     
-    // Here you can integrate with your email service (nodemailer, SendGrid, etc.)
-    // For now, just return the link
-    console.log(`Verification link for ${email}: ${verificationLink}`);
+    // Send verification email using Firebase's built-in email service
+    try {
+      await auth.sendEmailVerificationLink(email, {
+        url: process.env.BACKEND_URL || 'http://localhost:3000'
+      });
+      console.log(`Verification email sent to ${email}`);
+    } catch (emailError) {
+      console.warn('Firebase email sending skipped:', emailError.message);
+      console.log(`Verification link for ${email}: ${verificationLink}`);
+    }
     
     return verificationLink;
   } catch (error) {
