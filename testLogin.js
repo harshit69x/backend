@@ -39,7 +39,7 @@ const auth = admin.auth();
 
 // Test data - email that was already signed up
 const testUser = {
-  email: 'zatelogy@denipl.net',
+  email: 'xulicyxu@forexzig.com',
   password: 'TestPassword123'
 };
 

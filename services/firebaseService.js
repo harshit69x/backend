@@ -1,5 +1,4 @@
 const admin = require('firebase-admin');
-const nodemailer = require('nodemailer');
 
 try {
   // Check if Firebase is already initialized
@@ -30,22 +29,11 @@ try {
 const auth = admin.auth();
 const db = admin.firestore();
 
-// Setup email transporter for sending verification emails
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || 'smtp.gmail.com',
-  port: process.env.SMTP_PORT || 465,
-  secure: process.env.SMTP_SECURE !== 'false', // true for 465, false for other ports
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  }
-});
-
 /**
- * Create a Firebase user and send verification email
+ * Create a Firebase user (email sending handled by frontend Firebase Client SDK)
  * @param {string} email - User email
  * @param {string} password - User password
- * @returns {Promise<{uid: string, email: string}>} Firebase user object
+ * @returns {Promise<{uid: string, email: string, verificationLink: string}>} Firebase user object with verification link
  */
 const createFirebaseUser = async (email, password) => {
   try {
@@ -57,17 +45,9 @@ const createFirebaseUser = async (email, password) => {
 
     console.log('Firebase user created:', userRecord.uid);
 
-    // Generate verification link
+    // Generate verification link for frontend to use with Firebase Client SDK
     const verificationLink = await auth.generateEmailVerificationLink(email);
-
-    // Send verification email using nodemailer
-    try {
-      await sendEmailVerificationLinkViaEmail(email, verificationLink);
-      console.log('✅ Verification email sent to:', email);
-    } catch (emailError) {
-      console.warn('⚠️  Email sending warning:', emailError.message);
-      console.log('💡 Verification link generated but email not sent. User can verify via link.');
-    }
+    console.log('Verification link generated for frontend Firebase Client SDK');
 
     return {
       uid: userRecord.uid,
@@ -76,61 +56,6 @@ const createFirebaseUser = async (email, password) => {
     };
   } catch (error) {
     console.error('Error creating Firebase user:', error.message);
-    throw error;
-  }
-};
-
-/**
- * Send verification email using nodemailer
- * @param {string} email - User email
- * @param {string} verificationLink - Verification link to include in email
- * @returns {Promise<void>}
- */
-const sendEmailVerificationLinkViaEmail = async (email, verificationLink) => {
-  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
-    throw new Error('Email configuration missing: EMAIL_USER or EMAIL_PASS not set');
-  }
-
-  try {
-    const mailOptions = {
-      from: process.env.EMAIL_USER,
-      to: email,
-      subject: 'Verify Your ZEEN Account',
-      html: `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #1E5B3F;">Welcome to ZEEN!</h2>
-        <p>Thank you for signing up for ZEEN - your personal expense tracker.</p>
-        <p>Please click the button below to verify your email address and activate your account:</p>
-
-        <div style="text-align: center; margin: 30px 0;">
-          <a href="${verificationLink}"
-             style="background-color: #1E5B3F; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">
-            Verify Email Address
-          </a>
-        </div>
-
-        <p>If the button doesn't work, you can also copy and paste this link into your browser:</p>
-        <p style="word-break: break-all; color: #666;">${verificationLink}</p>
-
-        <p>This link will expire in 24 hours.</p>
-
-        <p><strong>After verification, please return to the ZEEN app to login.</strong></p>
-
-        <p>If you didn't create an account with ZEEN, please ignore this email.</p>
-
-        <hr style="margin: 30px 0; border: none; border-top: 1px solid #eee;">
-        <p style="color: #666; font-size: 12px;">
-          ZEEN - Expense Tracker<br>
-          © 2025 ZEEN. All rights reserved.
-        </p>
-      </div>
-      `
-    };
-
-    await transporter.sendMail(mailOptions);
-    console.log('Email sent successfully to:', email);
-  } catch (error) {
-    console.error('Error sending email:', error.message);
     throw error;
   }
 };
@@ -202,18 +127,28 @@ const sendVerificationEmail = async (email) => {
 };
 
 /**
- * Verify a user's email using a verification link
- * This validates a verification link without actually changing anything in Firebase
- * (Firebase handles that automatically when user clicks the link in email)
+ * Verify a user's email using the oobCode from verification link
+ * This applies the verification action code to mark email as verified in Firebase
  * @param {string} oobCode - Out of band code from verification link
- * @returns {Promise<string>} User email if successful
+ * @returns {Promise<{email: string, emailVerified: boolean}>} Verification result
  */
 const verifyEmailWithCode = async (oobCode) => {
   try {
-    const email = await auth.verifyIdToken(oobCode);
-    return email;
+    // Apply the action code to verify the email
+    await auth.applyActionCode(oobCode);
+
+    // Get the user info from the action code
+    const actionCodeInfo = await auth.checkActionCode(oobCode);
+    const email = actionCodeInfo.data.email;
+
+    console.log('Email verified successfully for:', email);
+
+    return {
+      email: email,
+      emailVerified: true
+    };
   } catch (error) {
-    console.error('Error verifying email:', error.message);
+    console.error('Error verifying email with code:', error.message);
     throw error;
   }
 };
@@ -226,6 +161,5 @@ module.exports = {
   getFirebaseUserByEmail,
   deleteFirebaseUser,
   sendVerificationEmail,
-  verifyEmailWithCode,
-  sendEmailVerificationLinkViaEmail
+  verifyEmailWithCode
 };

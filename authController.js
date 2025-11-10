@@ -1,7 +1,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('./models/user');
-const { createFirebaseUser } = require('./services/firebaseService');
+const { createFirebaseUser, verifyEmailWithCode, getFirebaseUserByEmail } = require('./services/firebaseService');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
@@ -133,44 +133,35 @@ const login = async (req, res) => {
   }
 };
 
-// Verify email and allow user to login
+// Verify email using oobCode from Firebase verification link
 const verifyEmail = async (req, res) => {
   try {
-    const { firebaseUid, email } = req.body;
+    const { oobCode } = req.body;
 
-    if (!firebaseUid || !email) {
-      return res.status(400).json({ error: 'Firebase UID and email are required' });
+    if (!oobCode) {
+      return res.status(400).json({ error: 'Verification code (oobCode) is required' });
     }
 
-    // Find user in MongoDB by email (primary lookup)
-    let user = await User.findOne({ email: email.toLowerCase() });
+    // Verify the email with Firebase using the oobCode
+    const verificationResult = await verifyEmailWithCode(oobCode);
+    console.log('Email verification successful for:', verificationResult.email);
 
-    // If not found by email, try by firebaseUid
+    // Find user in MongoDB by email
+    const user = await User.findOne({ email: verificationResult.email.toLowerCase() });
+
     if (!user) {
-      user = await User.findOne({ firebaseUid: firebaseUid });
-    }
-
-    if (!user) {
-      return res.status(404).json({ error: 'User not found. Please sign up first.' });
-    }
-
-    // Check if Firebase confirms email is verified
-    const { getFirebaseUserByEmail } = require('./services/firebaseService');
-    const firebaseUser = await getFirebaseUserByEmail(email.toLowerCase());
-    
-    if (!firebaseUser || !firebaseUser.emailVerified) {
-      return res.status(400).json({ 
-        error: 'Email not verified in Firebase yet',
-        message: 'Please click the verification link in your email'
+      return res.status(404).json({
+        error: 'User not found',
+        message: 'Please sign up first before verifying your email'
       });
     }
 
-    // Mark user as verified in MongoDB
+    // Update user as verified in MongoDB
     user.emailVerified = true;
     await user.save();
-    console.log('User email verified:', email);
+    console.log('User email verified in MongoDB:', verificationResult.email);
 
-    // Generate JWT token
+    // Generate JWT token for immediate login after verification
     const token = jwt.sign(
       { userId: user._id, email: user.email },
       JWT_SECRET,
@@ -178,18 +169,43 @@ const verifyEmail = async (req, res) => {
     );
 
     const userResponse = {
-      message: 'Email verified successfully! You can now login.',
+      message: 'Email verified successfully! Welcome to ZEEN.',
       user: {
         _id: user._id,
         name: user.name,
-        email: user.email
+        email: user.email,
+        emailVerified: true
       },
-      token: token
+      token: token,
+      nextStep: 'You can now login to your account'
     };
 
     res.json(userResponse);
   } catch (error) {
     console.error('Email verification error:', error);
+
+    // Handle specific Firebase errors
+    if (error.code === 'auth/expired-action-code') {
+      return res.status(400).json({
+        error: 'Verification link expired',
+        message: 'Please request a new verification email'
+      });
+    }
+
+    if (error.code === 'auth/invalid-action-code') {
+      return res.status(400).json({
+        error: 'Invalid verification link',
+        message: 'Please check your email for the correct verification link'
+      });
+    }
+
+    if (error.code === 'auth/user-disabled') {
+      return res.status(403).json({
+        error: 'Account disabled',
+        message: 'Your account has been disabled. Please contact support.'
+      });
+    }
+
     res.status(500).json({ error: 'Failed to verify email: ' + error.message });
   }
 };
