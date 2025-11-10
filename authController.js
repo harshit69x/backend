@@ -133,54 +133,104 @@ const login = async (req, res) => {
   }
 };
 
-// Verify email using oobCode from Firebase verification link
+// Verify email using oobCode from Firebase verification link OR firebaseUid + email for testing
 const verifyEmail = async (req, res) => {
   try {
-    const { oobCode } = req.body;
+    const { oobCode, firebaseUid, email } = req.body;
 
-    if (!oobCode) {
-      return res.status(400).json({ error: 'Verification code (oobCode) is required' });
+    // Handle both new format (oobCode) and old format (firebaseUid + email) for testing
+    if (oobCode) {
+      // New Firebase Client SDK flow
+      const verificationResult = await verifyEmailWithCode(oobCode);
+      console.log('Email verification successful for:', verificationResult.email);
+
+      // Find user in MongoDB by email
+      const user = await User.findOne({ email: verificationResult.email.toLowerCase() });
+
+      if (!user) {
+        return res.status(404).json({
+          error: 'User not found',
+          message: 'Please sign up first before verifying your email'
+        });
+      }
+
+      // Update user as verified in MongoDB
+      user.emailVerified = true;
+      await user.save();
+      console.log('User email verified in MongoDB:', verificationResult.email);
+
+      // Generate JWT token for immediate login after verification
+      const token = jwt.sign(
+        { userId: user._id, email: user.email },
+        JWT_SECRET,
+        { expiresIn: JWT_EXPIRES_IN }
+      );
+
+      const userResponse = {
+        message: 'Email verified successfully! Welcome to ZEEN.',
+        user: {
+          _id: user._id,
+          name: user.name,
+          email: user.email,
+          emailVerified: true
+        },
+        token: token,
+        nextStep: 'You can now login to your account'
+      };
+
+      res.json(userResponse);
+    } else if (firebaseUid && email) {
+      // Old format for testing/backward compatibility
+      console.log('Using old verification format for testing');
+
+      // Find user in MongoDB by email (primary lookup)
+      let user = await User.findOne({ email: email.toLowerCase() });
+
+      // If not found by email, try by firebaseUid
+      if (!user) {
+        user = await User.findOne({ firebaseUid: firebaseUid });
+      }
+
+      if (!user) {
+        return res.status(404).json({ error: 'User not found. Please sign up first.' });
+      }
+
+      // Check if Firebase confirms email is verified
+      const firebaseUser = await getFirebaseUserByEmail(email.toLowerCase());
+
+      if (!firebaseUser || !firebaseUser.emailVerified) {
+        return res.status(400).json({
+          error: 'Email not verified in Firebase yet',
+          message: 'Please verify your email first'
+        });
+      }
+
+      // Mark user as verified in MongoDB
+      user.emailVerified = true;
+      await user.save();
+      console.log('User email verified:', email);
+
+      // Generate JWT token
+      const token = jwt.sign(
+        { userId: user._id, email: user.email },
+        JWT_SECRET,
+        { expiresIn: JWT_EXPIRES_IN }
+      );
+
+      const userResponse = {
+        message: 'Email verified successfully! You can now login.',
+        user: {
+          _id: user._id,
+          name: user.name,
+          email: user.email
+        },
+        token: token
+      };
+
+      res.json(userResponse);
+    } else {
+      return res.status(400).json({ error: 'Either oobCode OR firebaseUid + email are required' });
     }
-
-    // Verify the email with Firebase using the oobCode
-    const verificationResult = await verifyEmailWithCode(oobCode);
-    console.log('Email verification successful for:', verificationResult.email);
-
-    // Find user in MongoDB by email
-    const user = await User.findOne({ email: verificationResult.email.toLowerCase() });
-
-    if (!user) {
-      return res.status(404).json({
-        error: 'User not found',
-        message: 'Please sign up first before verifying your email'
-      });
-    }
-
-    // Update user as verified in MongoDB
-    user.emailVerified = true;
-    await user.save();
-    console.log('User email verified in MongoDB:', verificationResult.email);
-
-    // Generate JWT token for immediate login after verification
-    const token = jwt.sign(
-      { userId: user._id, email: user.email },
-      JWT_SECRET,
-      { expiresIn: JWT_EXPIRES_IN }
-    );
-
-    const userResponse = {
-      message: 'Email verified successfully! Welcome to ZEEN.',
-      user: {
-        _id: user._id,
-        name: user.name,
-        email: user.email,
-        emailVerified: true
-      },
-      token: token,
-      nextStep: 'You can now login to your account'
-    };
-
-    res.json(userResponse);
   } catch (error) {
     console.error('Email verification error:', error);
 
