@@ -524,8 +524,14 @@ app.delete('/api/expenses', async (req, res) => {
 // --- Categories CRUD ---
 app.get('/api/categories', async (req, res) => {
   try {
-    console.log("okay")
-    const categories = await Category.find().sort('name');
+    const { userId } = req.query; // Get userId from query params
+    
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
+    }
+    
+    // Only fetch categories that belong to this specific user
+    const categories = await Category.find({ userId: userId }).sort('name');
     res.json(categories);
   } catch (_err) {
     res.status(500).json({ error: 'Failed to fetch categories' });
@@ -534,7 +540,23 @@ app.get('/api/categories', async (req, res) => {
 
 app.post('/api/categories', async (req, res) => {
   try {
-    const category = new Category(req.body);
+    const { userId, name, icon, color } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
+    }
+    
+    if (!name) {
+      return res.status(400).json({ error: 'Category name is required' });
+    }
+    
+    const category = new Category({
+      userId,
+      name,
+      icon,
+      color
+    });
+    
     await category.save();
     res.status(201).json(category);
   } catch (_err) {
@@ -544,8 +566,27 @@ app.post('/api/categories', async (req, res) => {
 
 app.put('/api/categories/:id', async (req, res) => {
   try {
-    const category = await Category.findByIdAndUpdate(req.params.id, req.body, { new: true });
-    if (!category) return res.status(404).json({ error: 'Category not found' });
+    const { userId, name, icon, color } = req.body;
+    const categoryId = req.params.id;
+    
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
+    }
+    
+    // First verify the category belongs to this user
+    const existingCategory = await Category.findOne({ _id: categoryId, userId: userId });
+    
+    if (!existingCategory) {
+      return res.status(404).json({ error: 'Category not found or does not belong to this user' });
+    }
+    
+    // Update the category
+    const category = await Category.findByIdAndUpdate(
+      categoryId, 
+      { name, icon, color },
+      { new: true }
+    );
+    
     res.json(category);
   } catch (_err) {
     res.status(400).json({ error: 'Failed to update category' });
