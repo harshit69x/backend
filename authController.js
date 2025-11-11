@@ -1,12 +1,12 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('./models/user');
-const { createFirebaseUser, verifyEmailWithCode, getFirebaseUserByEmail } = require('./services/firebaseService');
+const admin = require('firebase-admin');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
-// Register new user with Firebase
+// Register new user - ONLY create Firebase user, DON'T send email (Client SDK handles it)
 const register = async (req, res) => {
   try {
     const { name, email, password, preferences } = req.body;
@@ -25,61 +25,81 @@ const register = async (req, res) => {
       return res.status(409).json({ error: 'Email already exists' });
     }
 
-    // Create Firebase user
+    // Create Firebase user with Admin SDK (NO EMAIL SENDING - Client SDK will handle it)
     let firebaseUser;
     try {
-      firebaseUser = await createFirebaseUser(email.toLowerCase(), password);
-      console.log('Firebase user created:', firebaseUser.uid);
+      firebaseUser = await admin.auth().createUser({
+        email: email.toLowerCase(),
+        password: password,
+        displayName: name,
+        emailVerified: false // Not verified yet
+      });
+      
+      console.log('✅ Firebase user created (NO EMAIL SENT):', firebaseUser.uid);
     } catch (firebaseError) {
-      console.error('Firebase creation error:', firebaseError.message);
+      console.error('❌ Firebase creation error:', firebaseError);
       
       if (firebaseError.code === 'auth/email-already-exists') {
-        return res.status(409).json({ error: 'Email already registered. Please try logging in.' });
+        // Get existing Firebase user
+        try {
+          const existingFirebaseUser = await admin.auth().getUserByEmail(email.toLowerCase());
+          console.log('Firebase user already exists, using existing UID:', existingFirebaseUser.uid);
+          firebaseUser = existingFirebaseUser;
+        } catch (getError) {
+          return res.status(500).json({ 
+            error: 'Email already registered in Firebase',
+            details: getError.message 
+          });
+        }
+      } else {
+        return res.status(500).json({ 
+          error: 'Failed to create Firebase account',
+          details: firebaseError.message 
+        });
       }
-      
-      return res.status(400).json({ error: 'Failed to create user account: ' + firebaseError.message });
     }
 
-    // Hash password for MongoDB storage
+    // Hash password for MongoDB
     const saltRounds = 12;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-    // Create user in MongoDB but mark as NOT verified yet
+    // Save to MongoDB (pending verification)
     const user = new User({
       name,
       email: email.toLowerCase(),
       passwordHash: hashedPassword,
-      preferences: preferences || {},
+      preferences: preferences || { theme: 'dark', currency: 'INR', language: 'en' },
       wallets: [],
       firebaseUid: firebaseUser.uid,
-      emailVerified: false  // Not verified yet
+      emailVerified: false // Not verified yet
     });
 
     await user.save();
-    console.log('User saved to MongoDB (pending email verification):', email);
+    console.log('✅ User saved to MongoDB (pending verification):', email);
 
-    // Return response with verification link
-    const userResponse = {
-      message: 'User registered successfully! Check your email for the verification link.',
+    // Return success WITHOUT sending email
+    // The React Native app will handle email sending via Client SDK
+    res.status(201).json({
+      success: true,
+      message: 'Firebase user created. Client app should now send verification email.',
+      firebaseUid: firebaseUser.uid,
       user: {
         _id: user._id,
         name: user.name,
         email: user.email
-      },
-      firebaseUid: firebaseUser.uid,
-      verificationLink: firebaseUser.verificationLink,
-      nextStep: 'Please verify your email by clicking the link in your email to login',
-      note: 'You cannot login until your email is verified'
-    };
+      }
+    });
 
-    res.status(201).json(userResponse);
   } catch (error) {
-    console.error('Register error:', error);
-    res.status(500).json({ error: 'Failed to create user: ' + error.message });
+    console.error('❌ Register error:', error);
+    res.status(500).json({ 
+      error: 'Failed to create user',
+      details: error.message 
+    });
   }
 };
 
-// Login user (requires email to be verified)
+// Login user - check Firebase email verification
 const login = async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -88,21 +108,37 @@ const login = async (req, res) => {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 
-    // Find user by email
+    // Check Firebase email verification first
+    let firebaseUser;
+    try {
+      firebaseUser = await admin.auth().getUserByEmail(email.toLowerCase());
+      
+      if (!firebaseUser.emailVerified) {
+        return res.status(401).json({ 
+          error: 'Email not verified. Please check your email and verify your account before logging in.',
+          code: 'EMAIL_NOT_VERIFIED'
+        });
+      }
+    } catch (firebaseError) {
+      console.error('Firebase user lookup error:', firebaseError);
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    // Find user in MongoDB
     const user = await User.findOne({ email: email.toLowerCase() });
+    
     if (!user) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
-    // Check if email is verified
-    if (!user.emailVerified) {
-      return res.status(403).json({ 
-        error: 'Email not verified. Please verify your email first.',
-        message: 'Check your email for the verification link and click it to verify'
-      });
+    // Sync Firebase verification status to MongoDB
+    if (firebaseUser.emailVerified && !user.emailVerified) {
+      user.emailVerified = true;
+      await user.save();
+      console.log('✅ Email verification synced from Firebase to MongoDB:', email);
     }
 
-    // Check password
+    // Verify password
     const isPasswordValid = await bcrypt.compare(password, user.passwordHash);
     if (!isPasswordValid) {
       return res.status(401).json({ error: 'Invalid email or password' });
@@ -115,8 +151,8 @@ const login = async (req, res) => {
       { expiresIn: JWT_EXPIRES_IN }
     );
 
-    // Return user without password
-    const userResponse = {
+    // Return user data
+    res.json({
       message: 'Login successful',
       user: {
         _id: user._id,
@@ -124,139 +160,67 @@ const login = async (req, res) => {
         email: user.email
       },
       token: token
-    };
-
-    res.json(userResponse);
+    });
   } catch (error) {
-    console.error('Login error:', error);
+    console.error('❌ Login error:', error);
     res.status(500).json({ error: 'Failed to login' });
   }
 };
 
-// Verify email using oobCode from Firebase verification link OR firebaseUid + email for testing
+// Verify email endpoint - called after user clicks verification link
 const verifyEmail = async (req, res) => {
   try {
-    const { oobCode, firebaseUid, email } = req.body;
+    const { firebaseUid, email } = req.body;
 
-    // Handle both new format (oobCode) and old format (firebaseUid + email) for testing
-    if (oobCode) {
-      // New Firebase Client SDK flow
-      const verificationResult = await verifyEmailWithCode(oobCode);
-      console.log('Email verification successful for:', verificationResult.email);
-
-      // Find user in MongoDB by email
-      const user = await User.findOne({ email: verificationResult.email.toLowerCase() });
-
-      if (!user) {
-        return res.status(404).json({
-          error: 'User not found',
-          message: 'Please sign up first before verifying your email'
-        });
-      }
-
-      // Update user as verified in MongoDB
-      user.emailVerified = true;
-      await user.save();
-      console.log('User email verified in MongoDB:', verificationResult.email);
-
-      // Generate JWT token for immediate login after verification
-      const token = jwt.sign(
-        { userId: user._id, email: user.email },
-        JWT_SECRET,
-        { expiresIn: JWT_EXPIRES_IN }
-      );
-
-      const userResponse = {
-        message: 'Email verified successfully! Welcome to ZEEN.',
-        user: {
-          _id: user._id,
-          name: user.name,
-          email: user.email,
-          emailVerified: true
-        },
-        token: token,
-        nextStep: 'You can now login to your account'
-      };
-
-      res.json(userResponse);
-    } else if (firebaseUid && email) {
-      // Old format for testing/backward compatibility
-      console.log('Using old verification format for testing');
-
-      // Find user in MongoDB by email (primary lookup)
-      let user = await User.findOne({ email: email.toLowerCase() });
-
-      // If not found by email, try by firebaseUid
-      if (!user) {
-        user = await User.findOne({ firebaseUid: firebaseUid });
-      }
-
-      if (!user) {
-        return res.status(404).json({ error: 'User not found. Please sign up first.' });
-      }
-
-      // Check if Firebase confirms email is verified
-      const firebaseUser = await getFirebaseUserByEmail(email.toLowerCase());
-
-      if (!firebaseUser || !firebaseUser.emailVerified) {
-        return res.status(400).json({
-          error: 'Email not verified in Firebase yet',
-          message: 'Please verify your email first'
-        });
-      }
-
-      // Mark user as verified in MongoDB
-      user.emailVerified = true;
-      await user.save();
-      console.log('User email verified:', email);
-
-      // Generate JWT token
-      const token = jwt.sign(
-        { userId: user._id, email: user.email },
-        JWT_SECRET,
-        { expiresIn: JWT_EXPIRES_IN }
-      );
-
-      const userResponse = {
-        message: 'Email verified successfully! You can now login.',
-        user: {
-          _id: user._id,
-          name: user.name,
-          email: user.email
-        },
-        token: token
-      };
-
-      res.json(userResponse);
-    } else {
-      return res.status(400).json({ error: 'Either oobCode OR firebaseUid + email are required' });
+    if (!firebaseUid && !email) {
+      return res.status(400).json({ error: 'Firebase UID or email required' });
     }
+
+    // Get Firebase user
+    let firebaseUser;
+    try {
+      if (firebaseUid) {
+        firebaseUser = await admin.auth().getUser(firebaseUid);
+      } else {
+        firebaseUser = await admin.auth().getUserByEmail(email.toLowerCase());
+      }
+    } catch (error) {
+      return res.status(404).json({ error: 'User not found in Firebase' });
+    }
+
+    // Check if email is verified in Firebase
+    if (!firebaseUser.emailVerified) {
+      return res.status(400).json({ 
+        error: 'Email not verified in Firebase yet. Please click the verification link in your email.' 
+      });
+    }
+
+    // Find user in MongoDB and update verification status
+    const user = await User.findOne({ firebaseUid: firebaseUser.uid });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found in database' });
+    }
+
+    // Update verification status
+    user.emailVerified = true;
+    await user.save();
+
+    console.log('✅ Email verified and synced to MongoDB:', user.email);
+
+    res.json({ 
+      success: true, 
+      message: 'Email verified successfully',
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email
+      }
+    });
+
   } catch (error) {
-    console.error('Email verification error:', error);
-
-    // Handle specific Firebase errors
-    if (error.code === 'auth/expired-action-code') {
-      return res.status(400).json({
-        error: 'Verification link expired',
-        message: 'Please request a new verification email'
-      });
-    }
-
-    if (error.code === 'auth/invalid-action-code') {
-      return res.status(400).json({
-        error: 'Invalid verification link',
-        message: 'Please check your email for the correct verification link'
-      });
-    }
-
-    if (error.code === 'auth/user-disabled') {
-      return res.status(403).json({
-        error: 'Account disabled',
-        message: 'Your account has been disabled. Please contact support.'
-      });
-    }
-
-    res.status(500).json({ error: 'Failed to verify email: ' + error.message });
+    console.error('❌ Verify email error:', error);
+    res.status(500).json({ error: 'Failed to verify email' });
   }
 };
 
