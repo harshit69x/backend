@@ -1,6 +1,9 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('./models/user');
+const PendingUser = require('./models/pendingUser');
+// Import the initialized Firebase Admin SDK from firebaseService
+const firebaseService = require('./services/firebaseService');
 const admin = require('firebase-admin');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
@@ -19,10 +22,17 @@ const register = async (req, res) => {
       return res.status(400).json({ error: 'Password must be at least 6 characters long' });
     }
 
-    // Check if user already exists in MongoDB
+    // Check if user already exists in User collection (verified users)
     const existingUser = await User.findOne({ email: email.toLowerCase() });
     if (existingUser) {
       return res.status(409).json({ error: 'Email already exists' });
+    }
+
+    // Check if pending user exists and delete old one
+    const existingPendingUser = await PendingUser.findOne({ email: email.toLowerCase() });
+    if (existingPendingUser) {
+      await PendingUser.deleteOne({ email: email.toLowerCase() });
+      console.log('Deleted old pending user for:', email);
     }
 
     // Create Firebase user with Admin SDK (NO EMAIL SENDING - Client SDK will handle it)
@@ -63,19 +73,17 @@ const register = async (req, res) => {
     const saltRounds = 12;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-    // Save to MongoDB (pending verification)
-    const user = new User({
+    // Save to PendingUser collection (will be migrated to User after email verification)
+    const pendingUser = new PendingUser({
       name,
       email: email.toLowerCase(),
-      passwordHash: hashedPassword,
+      password: hashedPassword, // PendingUser uses 'password' field
       preferences: preferences || { theme: 'dark', currency: 'INR', language: 'en' },
-      wallets: [],
-      firebaseUid: firebaseUser.uid,
-      emailVerified: false // Not verified yet
+      firebaseUid: firebaseUser.uid
     });
 
-    await user.save();
-    console.log('✅ User saved to MongoDB (pending verification):', email);
+    await pendingUser.save();
+    console.log('✅ User saved to PendingUser collection (pending verification):', email);
 
     // Return success WITHOUT sending email
     // The React Native app will handle email sending via Client SDK
@@ -84,9 +92,9 @@ const register = async (req, res) => {
       message: 'Firebase user created. Client app should now send verification email.',
       firebaseUid: firebaseUser.uid,
       user: {
-        _id: user._id,
-        name: user.name,
-        email: user.email
+        _id: pendingUser._id,
+        name: pendingUser.name,
+        email: pendingUser.email
       }
     });
 
@@ -99,7 +107,7 @@ const register = async (req, res) => {
   }
 };
 
-// Login user - check Firebase email verification
+// Login user - check Firebase email verification and migrate from PendingUser if verified
 const login = async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -108,66 +116,144 @@ const login = async (req, res) => {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 
-    // Check Firebase email verification first
-    let firebaseUser;
-    try {
-      firebaseUser = await admin.auth().getUserByEmail(email.toLowerCase());
-      
-      if (!firebaseUser.emailVerified) {
-        return res.status(401).json({ 
-          error: 'Email not verified. Please check your email and verify your account before logging in.',
-          code: 'EMAIL_NOT_VERIFIED'
+    // First check if user exists in User collection (verified users)
+    let user = await User.findOne({ email: email.toLowerCase() });
+    
+    if (user) {
+      // User exists in User collection - verify password
+      const passwordMatch = await bcrypt.compare(password, user.passwordHash);
+      if (!passwordMatch) {
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+
+      // Check Firebase verification status
+      try {
+        const firebaseUser = await admin.auth().getUser(user.firebaseUid);
+        
+        if (!firebaseUser.emailVerified) {
+          return res.status(403).json({ 
+            error: 'Email not verified. Please check your email and verify your account.',
+            emailVerified: false
+          });
+        }
+
+        // Update MongoDB if out of sync
+        if (!user.emailVerified) {
+          user.emailVerified = true;
+          await user.save();
+        }
+      } catch (firebaseError) {
+        console.error('Firebase verification check error:', firebaseError);
+        return res.status(500).json({ 
+          error: 'Failed to verify email status',
+          details: firebaseError.message 
         });
       }
-    } catch (firebaseError) {
-      console.error('Firebase user lookup error:', firebaseError);
-      return res.status(401).json({ error: 'Invalid email or password' });
+
+      // Generate JWT token
+      const token = jwt.sign(
+        { userId: user._id, email: user.email },
+        JWT_SECRET,
+        { expiresIn: JWT_EXPIRES_IN }
+      );
+
+      return res.status(200).json({
+        success: true,
+        message: 'Login successful',
+        token,
+        user: {
+          _id: user._id,
+          name: user.name,
+          email: user.email,
+          wallets: user.wallets,
+          preferences: user.preferences,
+          emailVerified: true
+        }
+      });
     }
 
-    // Find user in MongoDB
-    const user = await User.findOne({ email: email.toLowerCase() });
+    // User not in User collection - check PendingUser
+    const pendingUser = await PendingUser.findOne({ email: email.toLowerCase() });
     
-    if (!user) {
-      return res.status(401).json({ error: 'Invalid email or password' });
+    if (!pendingUser) {
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // Sync Firebase verification status to MongoDB
-    if (firebaseUser.emailVerified && !user.emailVerified) {
-      user.emailVerified = true;
-      await user.save();
-      console.log('✅ Email verification synced from Firebase to MongoDB:', email);
+    // Verify password for pending user
+    const passwordMatch = await bcrypt.compare(password, pendingUser.password);
+    if (!passwordMatch) {
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // Verify password
-    const isPasswordValid = await bcrypt.compare(password, user.passwordHash);
-    if (!isPasswordValid) {
-      return res.status(401).json({ error: 'Invalid email or password' });
+    // Check Firebase verification status
+    let firebaseUser;
+    try {
+      firebaseUser = await admin.auth().getUser(pendingUser.firebaseUid);
+    } catch (firebaseError) {
+      console.error('Firebase user fetch error:', firebaseError);
+      return res.status(500).json({ 
+        error: 'Failed to check verification status',
+        details: firebaseError.message 
+      });
     }
+
+    if (!firebaseUser.emailVerified) {
+      return res.status(403).json({ 
+        error: 'Email not verified. Please check your email and verify your account.',
+        emailVerified: false,
+        code: 'EMAIL_NOT_VERIFIED'
+      });
+    }
+
+    // Email is verified! Migrate from PendingUser to User collection
+    console.log('🔄 Migrating user from PendingUser to User:', email);
+    
+    const newUser = new User({
+      name: pendingUser.name,
+      email: pendingUser.email,
+      passwordHash: pendingUser.password, // PendingUser uses 'password', User uses 'passwordHash'
+      preferences: pendingUser.preferences,
+      wallets: [],
+      firebaseUid: pendingUser.firebaseUid,
+      emailVerified: true
+    });
+
+    await newUser.save();
+    await PendingUser.deleteOne({ _id: pendingUser._id });
+    
+    console.log('✅ User migrated successfully from PendingUser to User');
 
     // Generate JWT token
     const token = jwt.sign(
-      { userId: user._id, email: user.email },
+      { userId: newUser._id, email: newUser.email },
       JWT_SECRET,
       { expiresIn: JWT_EXPIRES_IN }
     );
 
-    // Return user data
-    res.json({
+    res.status(200).json({
+      success: true,
       message: 'Login successful',
+      token,
       user: {
-        _id: user._id,
-        name: user.name,
-        email: user.email
-      },
-      token: token
+        _id: newUser._id,
+        name: newUser.name,
+        email: newUser.email,
+        wallets: newUser.wallets,
+        preferences: newUser.preferences,
+        emailVerified: true
+      }
     });
+
   } catch (error) {
     console.error('❌ Login error:', error);
-    res.status(500).json({ error: 'Failed to login' });
+    res.status(500).json({ 
+      error: 'Login failed',
+      details: error.message 
+    });
   }
 };
 
-// Verify email endpoint - called after user clicks verification link
+// Verify email endpoint - called after user verifies email to sync MongoDB
 const verifyEmail = async (req, res) => {
   try {
     const { firebaseUid, email } = req.body;
@@ -191,36 +277,74 @@ const verifyEmail = async (req, res) => {
     // Check if email is verified in Firebase
     if (!firebaseUser.emailVerified) {
       return res.status(400).json({ 
-        error: 'Email not verified in Firebase yet. Please click the verification link in your email.' 
+        error: 'Email not verified in Firebase yet. Please click the verification link in your email.',
+        emailVerified: false
       });
     }
 
-    // Find user in MongoDB and update verification status
-    const user = await User.findOne({ firebaseUid: firebaseUser.uid });
+    // Check if user already in User collection
+    let user = await User.findOne({ firebaseUid: firebaseUser.uid });
+    
+    if (user) {
+      // User already migrated, just update verification status
+      user.emailVerified = true;
+      await user.save();
+      console.log('✅ Email verified and synced to MongoDB:', user.email);
+      
+      return res.json({ 
+        success: true, 
+        message: 'Email verified successfully',
+        user: {
+          _id: user._id,
+          name: user.name,
+          email: user.email,
+          emailVerified: true
+        }
+      });
+    }
 
-    if (!user) {
+    // User not in User collection - check PendingUser and migrate
+    const pendingUser = await PendingUser.findOne({ firebaseUid: firebaseUser.uid });
+
+    if (!pendingUser) {
       return res.status(404).json({ error: 'User not found in database' });
     }
 
-    // Update verification status
-    user.emailVerified = true;
-    await user.save();
+    // Migrate from PendingUser to User
+    console.log('🔄 Migrating user from PendingUser to User:', pendingUser.email);
+    
+    const newUser = new User({
+      name: pendingUser.name,
+      email: pendingUser.email,
+      passwordHash: pendingUser.password, // PendingUser uses 'password', User uses 'passwordHash'
+      preferences: pendingUser.preferences,
+      wallets: [],
+      firebaseUid: pendingUser.firebaseUid,
+      emailVerified: true
+    });
 
-    console.log('✅ Email verified and synced to MongoDB:', user.email);
+    await newUser.save();
+    await PendingUser.deleteOne({ _id: pendingUser._id });
+    
+    console.log('✅ User migrated successfully from PendingUser to User');
 
     res.json({ 
       success: true, 
-      message: 'Email verified successfully',
+      message: 'Email verified and user activated successfully',
       user: {
-        _id: user._id,
-        name: user.name,
-        email: user.email
+        _id: newUser._id,
+        name: newUser.name,
+        email: newUser.email,
+        emailVerified: true
       }
     });
 
   } catch (error) {
     console.error('❌ Verify email error:', error);
-    res.status(500).json({ error: 'Failed to verify email' });
+    res.status(500).json({ 
+      error: 'Failed to verify email',
+      details: error.message 
+    });
   }
 };
 
